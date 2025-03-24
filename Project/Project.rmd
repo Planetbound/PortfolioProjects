@@ -1,0 +1,301 @@
+---
+title: "STAT 413 Project"
+author: Matthew Kim and Seth Paine
+editor: source
+output:
+  html_document:
+    code_folding: hide
+---
+
+```{r chunks,echo=T,output=F, warning=FALSE,include=FALSE}
+knitr::opts_chunk$set(message=F,
+                      warning=F)#turn off messages and warnings
+options(scipen = 999) #suppress scientific notation
+setwd("C:/Users/hanbe/OneDrive/Desktop/Kim's Workshop/school/ECON 366")
+```
+
+## Estimating the Total Land Area of Countries
+
+We first considered how we should efficiently sample latitudes and longitudes so that a large enough proportion of the points we sampled from landed within the country we were estimating.
+To achieve this, we restricted the region which we sampled from to the area covered by the maximum and minimum longitudes and latitudes of the country to estimate, creating a "box" around the country.
+For a country like Canada, because of the size, irregular shape, and prevalence of islands to the north, it was difficult to get an accurate estimate when trying to sample from such a large box.
+Thus, we decide to employ some simple stratified sampling techniques by splitting Canada into three different regions, forming boxes around each region and sampling from within each of those boxes, combining the results at the end.
+
+
+For sampling, since the Earth is spherical we could not just uniformly pick latitudes and longitudes as that would pick points more frequently near the poles.
+Instead, we uniformly picked $U$ and $V$ to get uniform spherical coordinates on the Earth by using the formulas:
+\begin{align}
+  \theta &= u\\
+  \phi &= \arccos(2v - 1)
+\end{align}
+where $\theta$ is our longitude and $\phi$ is our latitude.
+
+We restricted our $U$ to $[\min \theta, \max \theta]$ and $V$ to $[(\cos(\max \phi) + 1)/2, (\cos(\min \phi) + 1)/2]$ so we only pick points within the country's "box".
+
+Then we used simple acceptance/rejection to get the total number of points which landed within the estimated country, and divided by our total number of samples to get an estimate for the proportion of points within the country.
+Finally, we multiplied this proportion by the area of the country's box to get an estimate for the land area of the country.
+
+
+
+```{r, echo=F} 
+# install packages
+library(tidyverse)
+library(readxl)
+library(scales)
+library(kableExtra)
+library(rworldmap)
+library(geosphere)
+```
+The coordiates for the extreme points of each country were picked manually using Google Maps and other online sources such as Wikipedia. 
+```{r}
+# read coordinates data
+countryData <- read_excel("country_data.xlsx")
+countryData %>%
+  kbl(col.names=c("Country", "Min. Latitude", "Min. Longitude", "Max. Latitude", "Max. Longitude")) %>%
+  kable_styling(bootstrap_options = c("condensed","striped"))
+```
+
+<br>
+Below is the following algorithm used to estimate the area, using a sample size of $n=100,000$.
+```{r class.source = 'fold-show'}
+n <- 100000 # sample size 
+set.seed(10)
+# Sample random latitudes and longitudes
+inputCountry <- function(x, n=100000){
+  countryInfo <- countryData %>% 
+    filter(name==x) %>%
+    mutate(across(c(lat.min, long.min, lat.max, long.max))*pi/180) %>% # convert to radians 
+    mutate(across(c(lat.min, lat.max))+(pi/2)) %>% # shift by pi/2
+    mutate(across(c(long.min, long.max))+pi) # shift by pi
+  
+  # Random Longitude
+  theta <- runif(n, countryInfo$long.min, countryInfo$long.max)
+  # Random Latitude
+  v1 <- (cos(countryInfo$lat.min)+1)/2
+  v2 <- (cos(countryInfo$lat.max)+1)/2
+  v <- runif(n, v2, v1)
+  psi <- acos(2*v-1)
+  
+  coords <- data.frame(long=(theta-pi)*(180/pi), lat=(psi-(pi/2))*(180/pi))
+  return(coords)
+}
+
+# Determine which country the coordinates land on
+coordsToCountry <- function(x){
+  countriesSP <- getMap(resolution="low")
+  pointsSP <- SpatialPoints(x, proj4string=CRS(proj4string(countriesSP)))
+  indices <- over(pointsSP, countriesSP)
+  indices$ADMIN
+}
+
+# Calculate the area of the boundary region
+boxArea <- function(x){
+  countryInfo <- countryData %>% filter(name==x)
+  coords <- matrix(c(countryInfo$long.min, countryInfo$lat.max,
+                     countryInfo$long.max, countryInfo$lat.max,
+                     countryInfo$long.max, countryInfo$lat.min,
+                     countryInfo$long.min, countryInfo$lat.min), ncol=2, byrow=T)
+  area <- areaPolygon(coords)
+  return(area/1000000) # convert to km^2
+}
+
+# Construct confidence interval
+conf.int <- function(est, n, alpha, box){
+  vari <- est*(box-est)/(n-1)
+  norm <- c(est - qnorm(1-alpha/2)*sqrt(vari), est + qnorm(1-alpha/2)*sqrt(vari) )
+  return(norm)
+}
+```
+
+## Big Countries 
+
+Note: There are many lakes in both Canada (Great Bear Lake, Lake Winnipeg, etc.) and China (Yangtze River, Yellow River, etc.) that don't contribute to the total land area. However, the *rworldmap* package isn't able to differentiate between whether the coordinates belong on land or on water, which results in our algorithm overestimating the land area.
+
+### Canada
+
+As mentioned above, we split Canada into three separate regions. The number of sample points are allocated roughly according to the size of the bounding boxes for the three regions, which we chose to be 38%-50%-12% for Western Canada, Eastern Canada, and the Nunavut Islands respectively. 
+
+```{r}
+west.can <- coordsToCountry(inputCountry("Western Canada", n*0.38))
+east.can <- coordsToCountry(inputCountry("Eastern Canada", n*0.50))
+nunavut.islands <- coordsToCountry(inputCountry("Nunavut Islands", n*0.12))
+
+n.west <- data.frame(table(west.can))
+n.east <- data.frame(table(east.can))
+n.nunavut <- data.frame(table(nunavut.islands))
+
+p.west <- n.west[which(n.west=="Canada"), 2]
+p.east <- n.east[which(n.east=="Canada"), 2]
+p.nunavut <- n.nunavut[which(n.nunavut=="Canada"), 2]
+
+p.can <- (p.west + p.east + p.nunavut)/n
+
+totalBox <- boxArea("Western Canada") + boxArea("Eastern Canada") + boxArea("Nunavut Islands")
+canArea <- totalBox * p.can
+canArea
+```
+The estimated area is `r comma(canArea)`km^2^, while the actual land area is 9,093,507km^2^. If we disregard the water area in our estimate, we may end up with a fairly accurate result. However it's difficult to precisely measure how much water area is contributing to our estimate due to the large number of lakes. 
+```{r}
+canInt <- conf.int(canArea, n, 0.05, totalBox)
+canInt
+```
+The 95% confidence interval is (`r comma(canInt[1])`, `r comma(canInt[2])`). As stated above, it's difficult to obtain a confidence interval for just the land area
+
+### China
+```{r}
+china <- coordsToCountry(inputCountry("China", n))
+n.china <- data.frame(table(china))
+p.china <- n.china[which(n.china=="China"), 2]/n
+chinaArea <- boxArea("China") * p.china
+chinaArea
+```
+The estimated area is `r comma(chinaArea)`km^2^, while the actual land area is 9,326,410km^2^. China has a water area of 270,550km^2^ and unlike Canada, it doesn't suffer from the problem of having as many islands. Therefore, if we disregard the water area in our estimate, we end up with a fairly accurate result of `r comma(chinaArea-270550)`km^2^.
+
+```{r}
+chinaInt <- conf.int(chinaArea, n, 0.05, boxArea("China"))
+chinaInt
+```
+The 95% confidence interval is (`r comma(chinaInt[1])`, `r comma(chinaInt[2])`). If we were to subtract the water area from this interval, our interval of (`r comma(chinaInt[1]-270550)`, `r comma(chinaInt[2]-270550)`) includes the true land area of China. 
+
+
+Although we don't have an exact confidence interval for the land area of Canada, if we were to subtract an approximate water area of 600,000km^2^, we would observe the interval to be entirely below that of China, therefore we can conclude there's a statistical difference between the land area of the two countries which is reasonable considering China has a larger land area than Canada.
+
+## Medium Countries
+
+### Colombia
+```{r}
+colombia <- coordsToCountry(inputCountry("Colombia", n))
+n.colombia <- data.frame(table(colombia))
+p.colombia <- n.colombia[which(n.colombia=="Colombia"), 2]/n
+colombiaArea <- boxArea("Colombia") * p.colombia
+colombiaArea
+```
+The estimated area is `r comma(colombiaArea)`km^2^, while the actual land area is 1,038,700km^2^. Colombia has a water area of 100,210km^2^, therefore if we disregard the water area in our estimate, we obtain a very accurate result of `r comma(colombiaArea-100210)`km^2^.
+
+```{r}
+colInt <- conf.int(colombiaArea, n, 0.05, boxArea("Colombia"))
+colInt
+```
+The 95% confidence interval is (`r comma(colInt[1])`, `r comma(colInt[2])`). Again, if we subtract the water area we get an interval of (`r comma(colInt[1]-100210)`, `r comma(colInt[2]-100210)`) that includes the true area of Colombia.
+
+### Egypt
+```{r}
+egypt <- coordsToCountry(inputCountry("Egypt", n))
+n.egypt <- data.frame(table(egypt))
+p.egypt <- n.egypt[which(n.egypt=="Egypt"), 2]/n
+egyptArea <- boxArea("Egypt") * p.egypt
+egyptArea
+```
+The estimated area is `r comma(egyptArea)`km^2^, while the actual land area is 995,450km^2^. Egypt has a water area of 6,000km^2^, thus if we disregard the water area in our estimate, we obtain a fairly accurate result of `r comma(egyptArea-6000)`km^2^.
+
+```{r}
+egyInt <- conf.int(egyptArea, n, 0.05, boxArea("Egypt"))
+egyInt
+```
+The 95% confidence interval is (`r comma(egyInt[1])`, `r comma(egyInt[2])`). Subtracting the water area, we get a confidence interval of (`r comma(egyInt[1]-6000)`, `r comma(egyInt[2]-6000)`) which includes the true area of Egypt.
+
+
+Comparing the two confidence intervals for Colombia and Egypt after adjusting for the water area, we see the two intervals don't overlap, which suggests the land area of Colombia is statistically different to that of Egypt.
+
+## Small Countries
+
+### Cuba
+```{r}
+cuba <- coordsToCountry(inputCountry("Cuba", n))
+n.cuba <- data.frame(table(cuba))
+p.cuba <- n.cuba[which(n.cuba=="Cuba"), 2]/n
+cubaArea <- boxArea("Cuba") * p.cuba
+cubaArea
+```
+The estimated area is `r comma(cubaArea)`km^2^, while the actual land area is 109,884km^2^. Cuba has no water area thus our estimate is very close to the actual land area.
+
+```{r}
+cubaInt <- conf.int(cubaArea, n, 0.05, boxArea("Cuba"))
+cubaInt 
+```
+The 95% confidence interval is (`r comma(cubaInt[1])`, `r comma(cubaInt[2])`). As mentioned above, we don't need to worry about the water area interfering with the estimate which gives us an interval that contains the true area of Cuba. 
+
+### Iceland
+```{r}
+iceland <- coordsToCountry(inputCountry("Iceland", n))
+n.iceland <- data.frame(table(iceland))
+p.iceland <- n.iceland[which(n.iceland=="Iceland"), 2]/n
+icelandArea <- boxArea("Iceland") * p.iceland
+icelandArea
+```
+The estimated area is `r comma(icelandArea)`km^2^, while the actual land area is 100,250km^2^. Iceland has a small water area of 2,750km^2^, so subtracting this out of the estimate we get an area of `r comma(icelandArea-2750)`km^2^.
+
+```{r}
+iceInt <- conf.int(icelandArea, n, 0.05, boxArea("Iceland"))
+iceInt
+```
+The 95% confidence interval is (`r comma(iceInt[1])`, `r comma(iceInt[2])`). Like before, if we adjust the confidence interval to disregard the water area, we get an interval of (`r comma(iceInt[1]-2750)`, `r comma(iceInt[2]-2750)`) which doesn't contain the true area of Iceland. However, the upper bound is fairly close to the actual area. 
+
+
+Comparing the two confidence intervals for Cuba and Iceland after adjusting for the water area, we see the two intervals don't overlap, which suggests the land area of Cuba is statistically different to that of Iceland.
+
+## Error Bounds Based on Country Sizes
+The margin of error changes significantly based on the size of the countries.
+
+
+For the big countries, we observe a margin of error in the hundred thousands. 
+
+
+The medium countries have a considerably lower margin of error, hovering between the high thousands to the low ten thousands.
+
+
+Lastly, the small countries have the tightest margin of error, which ranges near the low thousands. 
+
+
+This result makes sense since the bigger countries will have a larger "box", thus the variance will also be larger. 
+
+
+## Even Smaller Countries
+
+### Lebanon
+```{r}
+lebanon <- coordsToCountry(inputCountry("Lebanon", n))
+n.lebanon <- data.frame(table(lebanon))
+p.lebanon <- n.lebanon[which(n.lebanon=="Lebanon"), 2]/n
+lebanonArea <- boxArea("Lebanon") * p.lebanon
+lebanonArea
+```
+The estimated area is `r comma(lebanonArea)`km^2^, while the actual land area is 10,230km^2^. Lebanon has a water area of 170km^2^, therefore our estimate excluding the water area is `r comma(lebanonArea-170)`km^2^.
+
+```{r}
+lebInt <- conf.int(lebanonArea, n, 0.05, boxArea("Lebanon"))
+lebInt
+```
+The 95% confidence interval is (`r comma(lebInt[1])`, `r comma(lebInt[2])`). Adjusting for the water area we get an interval of (`r comma(lebInt[1]-170)`, `r comma(lebInt[2]-170)`). 
+
+### Jamaica
+```{r}
+jamaica <- coordsToCountry(inputCountry("Jamaica", n))
+n.jamaica <- data.frame(table(jamaica))
+p.jamaica <- n.jamaica[which(n.jamaica=="Jamaica"), 2]/n
+jamaicaArea <- boxArea("Jamaica") * p.jamaica
+jamaicaArea
+```
+The estimated area is `r comma(jamaicaArea)`km^2^, while the actual land area is 10,831km^2^. Jamaica has a water area of 160km^2^, thus our estimate becomes `r comma(jamaicaArea-160)`km^2^ without the water area.
+
+```{r}
+jamInt <- conf.int(jamaicaArea, n, 0.05, boxArea("Jamaica"))
+jamInt
+```
+The 95% confidence interval is (`r comma(jamInt[1])`, `r comma(jamInt[2])`). Adjusting for the water area we get an interval of (`r comma(jamInt[1]-160)`, `r comma(jamInt[2]-160)`). 
+
+### Singapore
+```{r}
+singapore <- coordsToCountry(inputCountry("Singapore", n))
+n.singapore <- data.frame(table(singapore))
+p.singapore <- n.singapore[which(n.singapore=="Singapore"), 2]/n
+singaporeArea <- boxArea("Singapore") * p.singapore
+singaporeArea
+```
+The estimated area is `r comma(singaporeArea)`km^2^, while the actual land area is 716km^2^. Singapore has a water area of only 10km^2^, so excluding the water area from the estimate we get `r comma(singaporeArea-10)`km^2^, which is a poor estimate considering the size of the country.
+
+```{r}
+sinInt <- conf.int(singaporeArea, n, 0.05, boxArea("Singapore"))
+sinInt
+```
+The 95% confidence interval is (`r comma(sinInt[1])`, `r comma(sinInt[2])`). Adjusting for the water area we get an interval of (`r comma(sinInt[1]-10)`, `r comma(sinInt[2]-10)`). We observe that for a really small country like Singapore, our algorithm falls short on estimating the land area.
